@@ -268,7 +268,8 @@ func resourceTrueNASDataset() *schema.Resource {
 }
 
 func resourceTrueNASDatasetCreate(ctx context.Context, d *schema.ResourceData, m interface{}) diag.Diagnostics {
-	c := m.(*api.APIClient)
+	pc := m.(*TrueNASProviderClient)
+        c := pc.Client
 
 	input := expandDataset(d)
 
@@ -294,7 +295,8 @@ func resourceTrueNASDatasetCreate(ctx context.Context, d *schema.ResourceData, m
 func resourceTrueNASDatasetRead(ctx context.Context, d *schema.ResourceData, m interface{}) diag.Diagnostics {
 	var diags diag.Diagnostics
 
-	c := m.(*api.APIClient)
+	pc := m.(*TrueNASProviderClient)
+        c := pc.Client
 
 	id := d.Id()
 
@@ -471,7 +473,8 @@ func resourceTrueNASDatasetRead(ctx context.Context, d *schema.ResourceData, m i
 }
 
 func resourceTrueNASDatasetUpdate(ctx context.Context, d *schema.ResourceData, m interface{}) diag.Diagnostics {
-	c := m.(*api.APIClient)
+	pc := m.(*TrueNASProviderClient)
+        c := pc.Client
 
 	input := expandDatasetForUpdate(d)
 
@@ -495,7 +498,9 @@ func resourceTrueNASDatasetUpdate(ctx context.Context, d *schema.ResourceData, m
 func resourceTrueNASDatasetDelete(ctx context.Context, d *schema.ResourceData, m interface{}) diag.Diagnostics {
 	var diags diag.Diagnostics
 
-	c := m.(*api.APIClient)
+	pc := m.(*TrueNASProviderClient)
+        c := pc.Client
+
 	id := d.Id()
 
 	log.Printf("[DEBUG] Deleting TrueNAS dataset: %s", id)
