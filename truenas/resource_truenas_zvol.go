@@ -154,7 +154,8 @@ func resourceTrueNASZVOL() *schema.Resource {
 func resourceTrueNASZVOLRead(ctx context.Context, d *schema.ResourceData, m interface{}) diag.Diagnostics {
 	var diags diag.Diagnostics
 
-	c := m.(*api.APIClient)
+	pc := m.(*TrueNASProviderClient)
+	c := pc.Client
 	id := d.Id()
 
 	resp, _, err := c.DatasetApi.GetDataset(ctx, id).Execute()
@@ -278,7 +279,8 @@ func resourceTrueNASZVOLRead(ctx context.Context, d *schema.ResourceData, m inte
 }
 
 func resourceTrueNASZVOLCreate(ctx context.Context, d *schema.ResourceData, m interface{}) diag.Diagnostics {
-	c := m.(*api.APIClient)
+	pc := m.(*TrueNASProviderClient)
+	c := pc.Client
 
 	input := expandZvol(d)
 
@@ -300,7 +302,9 @@ func resourceTrueNASZVOLCreate(ctx context.Context, d *schema.ResourceData, m in
 func resourceTrueNASZVOLDelete(ctx context.Context, d *schema.ResourceData, m interface{}) diag.Diagnostics {
 	var diags diag.Diagnostics
 
-	c := m.(*api.APIClient)
+	pc := m.(*TrueNASProviderClient)
+	c := pc.Client
+
 	id := d.Id()
 
 	log.Printf("[DEBUG] Deleting TrueNAS zvol: %s", id)
@@ -322,7 +326,8 @@ func resourceTrueNASZVOLDelete(ctx context.Context, d *schema.ResourceData, m in
 }
 
 func resourceTrueNASZVOLUpdate(ctx context.Context, d *schema.ResourceData, m interface{}) diag.Diagnostics {
-	c := m.(*api.APIClient)
+	pc := m.(*TrueNASProviderClient)
+	c := pc.Client
 
 	input := api.UpdateDatasetParams{}
 

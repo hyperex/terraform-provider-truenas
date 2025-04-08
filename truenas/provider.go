@@ -55,12 +55,16 @@ func Provider() *schema.Provider {
 	}
 }
 
+type TrueNASProviderClient struct {
+	Client *api.APIClient
+	APIKey string
+}
+
 func providerConfigure(ctx context.Context, d *schema.ResourceData) (interface{}, diag.Diagnostics) {
 	apiKey := d.Get("api_key").(string)
 	baseURL := d.Get("base_url").(string)
 	debug := d.Get("debug").(bool)
 
-	// Warning or errors can be collected in a slice type
 	var diags diag.Diagnostics
 
 	ts := oauth2.StaticTokenSource(
@@ -77,6 +81,11 @@ func providerConfigure(ctx context.Context, d *schema.ResourceData) (interface{}
 	config.Debug = debug
 	config.HTTPClient = tc
 
-	c := api.NewAPIClient(config)
-	return c, diags
+	client := api.NewAPIClient(config)
+
+	return &TrueNASProviderClient{
+		Client: client,
+		APIKey: apiKey,
+	}, diags
 }
+

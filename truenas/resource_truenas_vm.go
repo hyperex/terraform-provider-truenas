@@ -7,7 +7,30 @@ import (
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/validation"
 	"strconv"
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"sort"
 )
+
+func deviceKey(d api.VMDevice) string {
+	keys := make([]string, 0, len(d.Attributes))
+	for k := range d.Attributes {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	parts := []string{d.Dtype}
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%v", k, d.Attributes[k]))
+	}
+
+	return strings.Join(parts, "|")
+}
+
 
 func resourceTrueNASVM() *schema.Resource {
 	return &schema.Resource{
@@ -141,12 +164,29 @@ func resourceTrueNASVM() *schema.Resource {
 					},
 				},
 			},
+			// ✅ Add dynamic computed fields here
+        		"mac": &schema.Schema{
+            			Description: "MAC address assigned to the VM NIC",
+            			Type:        schema.TypeString,
+            			Computed:    true,
+        		},
+        		"port": &schema.Schema{
+            			Description: "Port assigned to the display device",
+            			Type:        schema.TypeInt,
+            			Computed:    true,
+        		},
+        		"web_port": &schema.Schema{
+            			Description: "Web port assigned to the display device",
+            			Type:        schema.TypeInt,
+            			Computed:    true,
+        		},
 		},
 	}
 }
 
 func resourceTrueNASVMRead(ctx context.Context, d *schema.ResourceData, m interface{}) diag.Diagnostics {
-	c := m.(*api.APIClient)
+	pc := m.(*TrueNASProviderClient)
+	c := pc.Client
 
 	id, err := strconv.Atoi(d.Id())
 
@@ -199,7 +239,7 @@ func resourceTrueNASVMRead(ctx context.Context, d *schema.ResourceData, m interf
 	}
 
 	if resp.Devices != nil {
-		if err := d.Set("device", flattenVMDevices(resp.Devices)); err != nil {
+		if err := d.Set("device", flattenVMDevicesForResource(resp.Devices)); err != nil {
 			return diag.Errorf("error setting VM devices: %s", err)
 		}
 	}
@@ -211,11 +251,30 @@ func resourceTrueNASVMRead(ctx context.Context, d *schema.ResourceData, m interf
 	}
 
 	d.Set("vm_id", strconv.Itoa(int(resp.Id)))
+
+	// Extract dynamic values from devices
+	for _, dev := range resp.Devices {
+		if dev.Dtype == "NIC" {
+			if mac, ok := dev.Attributes["mac"].(string); ok {
+				d.Set("mac", mac)
+			}
+		}
+		if dev.Dtype == "DISPLAY" {
+			if port, ok := dev.Attributes["port"].(float64); ok {
+				d.Set("port", int(port))
+			}
+			if webPort, ok := dev.Attributes["web_port"].(float64); ok {
+				d.Set("web_port", int(webPort))
+			}
+		}
+	}
+
 	return nil
 }
 
 func resourceTrueNASVMCreate(ctx context.Context, d *schema.ResourceData, m interface{}) diag.Diagnostics {
-	c := m.(*api.APIClient)
+	pc := m.(*TrueNASProviderClient)
+	c := pc.Client
 
 	input := api.CreateVMParams{
 		Name: getStringPtr(d.Get("name").(string)),
@@ -282,7 +341,8 @@ func resourceTrueNASVMCreate(ctx context.Context, d *schema.ResourceData, m inte
 }
 
 func resourceTrueNASVMDelete(ctx context.Context, d *schema.ResourceData, m interface{}) diag.Diagnostics {
-	c := m.(*api.APIClient)
+	pc := m.(*TrueNASProviderClient)
+	c := pc.Client
 
 	id, err := strconv.Atoi(d.Id())
 
@@ -307,7 +367,8 @@ func resourceTrueNASVMDelete(ctx context.Context, d *schema.ResourceData, m inte
 }
 
 func resourceTrueNASVMUpdate(ctx context.Context, d *schema.ResourceData, m interface{}) diag.Diagnostics {
-	c := m.(*api.APIClient)
+	pc := m.(*TrueNASProviderClient)
+	c := pc.Client
 
 	id, err := strconv.Atoi(d.Id())
 
@@ -355,15 +416,29 @@ func resourceTrueNASVMUpdate(ctx context.Context, d *schema.ResourceData, m inte
 		input.Memory = getInt64Ptr(int64(d.Get("memory").(int)))
 	}
 
-	if d.HasChange("device") {
-		input.Devices, err = expandVMDeviceForUpdate(d.Get("device").(*schema.Set).List(), getInt32Ptr(int32(id)))
+	//if d.HasChange("device") {
+	//	input.Devices, err = expandVMDeviceForUpdate(d.Get("device").(*schema.Set).List(), getInt32Ptr(int32(id)))
 
+	//	if err != nil {
+	//		return diag.Errorf("error updating VM: %s", err)
+	//	}
+	//}
+
+	_, _, err = c.VmApi.UpdateVM(ctx, int32(id)).UpdateVMParams(input).Execute()
+
+	if d.HasChange("device") {
+		deviceList := d.Get("device").(*schema.Set).List()
+		devices, err := expandVMDevice(deviceList)
 		if err != nil {
-			return diag.Errorf("error updating VM: %s", err)
+			return diag.Errorf("error expanding device list: %s", err)
+		}
+
+		err = reconcileDevices(ctx, pc.Client, pc.APIKey, int32(id), devices)
+		if err != nil {
+			return diag.Errorf("error reconciling devices: %s", err)
 		}
 	}
 
-	_, _, err = c.VmApi.UpdateVM(ctx, int32(id)).UpdateVMParams(input).Execute()
 
 	// TODO: handle error response like:
 	//{{
@@ -488,3 +563,162 @@ func expandVMDevice(d []interface{}) ([]api.VMDevice, error) {
 
 	return result, nil
 }
+
+func reconcileDevices(ctx context.Context, c *api.APIClient, apiKey string, vmID int32, desired []api.VMDevice) error {
+
+	currentResp, _, err := c.VmApi.GetVM(ctx, vmID).Execute()
+	if err != nil {
+		return fmt.Errorf("error reading VM devices: %w", err)
+	}
+	current := currentResp.Devices
+
+	currentMap := map[string]api.VMDevice{}
+	for _, d := range current {
+		key := deviceKey(d)
+		currentMap[key] = d
+	}
+
+	desiredMap := map[string]api.VMDevice{}
+	for _, d := range desired {
+		key := deviceKey(d)
+		desiredMap[key] = d
+	}
+
+	// DELETE removed
+	for key, device := range currentMap {
+		if _, ok := desiredMap[key]; !ok {
+			if device.Id == nil || *device.Id == 0 {
+				continue // skip deletion if device ID is missing or invalid
+			}
+
+			path := fmt.Sprintf("/vm/device/%d", *device.Id)
+			_, err := makeRequest(ctx, c.GetConfig(), apiKey, "DELETE", path, nil)
+
+			// Handle 404s as non-fatal
+			if err != nil && strings.Contains(err.Error(), "404") {
+				continue
+			}
+
+			if err != nil {
+				return fmt.Errorf("failed to delete device (ID: %d): %w", *device.Id, err)
+			}
+		}
+
+	}
+
+	// CREATE new
+	for key, device := range desiredMap {
+		if _, ok := currentMap[key]; !ok {
+			device.Vm = &vmID
+			_, err := makeRequest(ctx, c.GetConfig(), apiKey, "POST", "/vm/device/", device)
+
+			if err != nil {
+				if strings.Contains(err.Error(), "already configured") {
+					continue // device exists, skip
+				}
+				return fmt.Errorf("failed to create device: %w", err)
+			}
+		}
+	}
+
+
+	return nil
+}
+
+func makeRequest(ctx context.Context, cfg *api.Configuration, apiKey string, method, path string, body interface{}) ([]byte, error) {
+	client := &http.Client{}
+
+	baseURL, err := cfg.ServerURLWithContext(ctx, "VMDevice")
+	if err != nil {
+		return nil, err
+	}
+	reqURL := fmt.Sprintf("%s%s", baseURL, path)
+
+	var reqBody []byte
+	if body != nil {
+		var err error
+		reqBody, err = json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, reqURL, bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, respBody)
+	}
+
+	return respBody, nil
+}
+
+func flattenVMDevicesForResource(devices []api.VMDevice) []map[string]interface{} {
+	result := make([]map[string]interface{}, 0, len(devices))
+
+	// Only include user-declared attributes per device type
+	allowedAttrs := map[string][]string{
+		"NIC":     {"type", "nic_attach", "trust_guest_rx_filters"},
+		"DISPLAY": {"type", "resolution", "web", "wait", "password", "bind"},
+		"DISK":    {"type", "path"},
+		// You can add more for other types like RAW, CDROM, etc.
+	}
+
+	for _, d := range devices {
+		device := map[string]interface{}{
+			"type": d.Dtype,
+		}
+
+		flattenedAttrs := make(map[string]string)
+
+		for k, v := range d.Attributes {
+			if v == nil {
+				continue
+			}
+
+			switch val := v.(type) {
+			case bool:
+				flattenedAttrs[k] = strconv.FormatBool(val)
+			case float64:
+				// For numbers like port, web_port, etc.
+				flattenedAttrs[k] = strconv.Itoa(int(val))
+			default:
+				flattenedAttrs[k] = fmt.Sprintf("%v", val)
+			}
+		}
+
+		// Filter to only include expected attributes for that type
+		filtered := make(map[string]string)
+		if keys, ok := allowedAttrs[d.Dtype]; ok {
+			for _, key := range keys {
+				if val, exists := flattenedAttrs[key]; exists {
+					filtered[key] = val
+				}
+			}
+		} else {
+			// Fallback: keep all if type unknown
+			filtered = flattenedAttrs
+		}
+
+		device["attributes"] = filtered
+
+		// Do NOT include: id, vm, order — let Terraform and TrueNAS manage that silently
+
+		result = append(result, device)
+	}
+
+	return result
+}
+
